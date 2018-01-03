@@ -353,6 +353,9 @@ class OrderManager:
         if (ohlc_pd.shape[0] <= 60) or (np.sum(ohlc_pd['up']) < ohlc_pd.shape[0] * 0.7):
             return buy_orders
 
+        if records_pd['price'].values.max() - records_pd['price'].values.min() <= 500:
+            return buy_orders
+
         # Step 3: Calculate the Buy Upper Bound
         max_buy_price = records_pd['price'].quantile(0.05)
 
@@ -369,8 +372,13 @@ class OrderManager:
         if position['currentQty'] == 0:
             return sell_orders
 
-        PROFIT_MARGIN = 0.1
-        sell_price = position['avgCostPrice'] * (1 + PROFIT_MARGIN)
+        records = self.exchange.bitmex.recent_trades()
+        records_pd = pd.DataFrame.from_dict(records)
+
+        PROFIT_MARGIN = 0.05
+        target_price = position['avgCostPrice'] * (1 + PROFIT_MARGIN)
+        target_mean_price = records_pd['price'].values.mean()
+        sell_price = max(target_price, target_mean_price)
         sell_orders.append({'price': sell_price, 'orderQty': position['currentQty'], 'side': "Sell"})
 
         return sell_orders
