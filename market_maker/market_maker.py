@@ -9,6 +9,8 @@ import sys
 from datetime import datetime
 from os.path import getmtime
 from time import sleep
+import pandas as pd
+import numpy as np
 
 import requests
 from market_maker import bitmex
@@ -26,10 +28,11 @@ logger = log.setup_custom_logger('root')
 class ExchangeInterface:
     def __init__(self, dry_run=False):
         self.dry_run = dry_run
-        if len(sys.argv) > 1:
-            self.symbol = sys.argv[1]
-        else:
-            self.symbol = settings.SYMBOL
+        # if len(sys.argv) > 1:
+        #     self.symbol = sys.argv[1]
+        # else:
+        #     self.symbol = settings.SYMBOL
+        self.symbol = settings.SYMBOL
         self.bitmex = bitmex.BitMEX(base_url=settings.BASE_URL, symbol=self.symbol,
                                     apiKey=settings.API_KEY, apiSecret=settings.API_SECRET,
                                     orderIDPrefix=settings.ORDERID_PREFIX, postOnly=settings.POST_ONLY)
@@ -312,32 +315,77 @@ class OrderManager:
 
     def place_orders(self):
         """Create order items for use in convergence."""
+        buy_orders = self.generate_buy_orders()
+        sell_orders = self.generate_sell_orders()
 
-        buy_orders = []
-        sell_orders = []
         # Create orders from the outside in. This is intentional - let's say the inner order gets taken;
         # then we match orders from the outside in, ensuring the fewest number of orders are amended and only
         # a new order is created in the inside. If we did it inside-out, all orders would be amended
         # down and a new order would be created at the outside.
-        for i in reversed(range(1, settings.ORDER_PAIRS + 1)):
-            if not self.long_position_limit_exceeded():
-                buy_orders.append(self.prepare_order(-i))
-            if not self.short_position_limit_exceeded():
-                sell_orders.append(self.prepare_order(i))
+        # for i in reversed(range(1, settings.ORDER_PAIRS + 1)):
+        #     if not self.long_position_limit_exceeded():
+        #         buy_orders.append(self.prepare_order(-i))
+        #     if not self.short_position_limit_exceeded():
+        #         sell_orders.append(self.prepare_order(i))
 
         return self.converge_orders(buy_orders, sell_orders)
 
-    def prepare_order(self, index):
-        """Create an order object."""
+    ###################
+    # Strategy
+    ##################
+    def generate_buy_orders(self):
+        buy_orders = []
 
-        if settings.RANDOM_ORDER_SIZE is True:
-            quantity = random.randint(settings.MIN_ORDER_SIZE, settings.MAX_ORDER_SIZE)
-        else:
-            quantity = settings.ORDER_START_SIZE + ((abs(index) - 1) * settings.ORDER_STEP_SIZE)
+        # Step 1: Check maximum holding Position
+        portfolio = self.exchange.get_portfolio()
+        if portfolio[settings.SYMBOL]["markPrice"] >= settings.ORDER_HOLDING_MAX_VALUE:
+            return buy_orders
 
-        price = self.get_price_offset(index)
+        # Step 2: Check the UP momentum during the last K hours
+        records = self.exchange.bitmex.recent_trades()
+        records_pd = pd.DataFrame.from_dict(records)
+        records_pd['timestamp_convert'] = pd.to_datetime(records_pd['timestamp'])
+        records_pd.drop('timestamp', axis=1, inplace=True)
+        records_pd.set_index('timestamp_convert', inplace=True)
+        ohlc_pd = records_pd['price'].resample('5Min').ohlc()
+        ohlc_pd['up'] = ohlc_pd['close'] > ohlc_pd['open']
 
-        return {'price': price, 'orderQty': quantity, 'side': "Buy" if index < 0 else "Sell"}
+        if (ohlc_pd.shape[0] <= 60) or (np.sum(ohlc_pd['up']) < ohlc_pd.shape[0] * 0.7):
+            return buy_orders
+
+        # Step 3: Calculate the Buy Upper Bound
+        max_buy_price = records_pd['price'].quantile(0.05)
+
+        # Step 4: Generate Orders With Three Depths & Check Maximum Quota
+        buy_orders.append({'price': max_buy_price, 'orderQty': 100, 'side': "Buy"})
+        buy_orders.append({'price': max_buy_price - 250, 'orderQty': 100, 'side': "Buy"})
+        buy_orders.append({'price': max_buy_price - 500, 'orderQty': 100, 'side': "Buy"})
+        return buy_orders
+
+    def generate_sell_orders(self):
+        sell_orders = []
+
+        position = self.exchange.bitmex.ws.position(settings.SYMBOL)
+        if position['currentQty'] == 0:
+            return sell_orders
+
+        PROFIT_MARGIN = 0.1
+        sell_price = position['avgCostPrice'] * (1 + PROFIT_MARGIN)
+        sell_orders.append({'price': sell_price, 'orderQty': position['currentQty'], 'side': "Sell"})
+
+        return sell_orders
+
+    # def prepare_order(self, index):
+    #     """Create an order object."""
+    #
+    #     if settings.RANDOM_ORDER_SIZE is True:
+    #         quantity = random.randint(settings.MIN_ORDER_SIZE, settings.MAX_ORDER_SIZE)
+    #     else:
+    #         quantity = settings.ORDER_START_SIZE + ((abs(index) - 1) * settings.ORDER_STEP_SIZE)
+    #
+    #     price = self.get_price_offset(index)
+    #
+    #     return {'price': price, 'orderQty': quantity, 'side': "Buy" if index < 0 else "Sell"}
 
     def converge_orders(self, buy_orders, sell_orders):
         """Converge the orders we currently have in the book with what we want to be in the book.
