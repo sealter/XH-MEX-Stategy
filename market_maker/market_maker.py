@@ -338,31 +338,54 @@ class OrderManager:
 
         # Step 1: Check maximum holding Position
         portfolio = self.exchange.get_portfolio()
-        if portfolio[settings.SYMBOL]["markPrice"] >= settings.ORDER_HOLDING_MAX_VALUE:
-            return buy_orders
+        current_position = portfolio[settings.SYMBOL]["currentQty"] # each contract is around 1 USD
+        if current_position >= settings.ORDER_HOLDING_MAX_VALUE:
+            logger.info("current_position (Qty): %d, ORDER_HOLDING_MAX_VALUE: %d." % (current_position, settings.ORDER_HOLDING_MAX_VALUE))
+            return []
 
-        # Step 2: Check the UP momentum during the last K hours
+        # Step 2: Check the UP momentum
         records = self.exchange.bitmex.recent_trades()
         records_pd = pd.DataFrame.from_dict(records)
         records_pd['timestamp_convert'] = pd.to_datetime(records_pd['timestamp'])
-        records_pd.drop('timestamp', axis=1, inplace=True)
+        analysis_window = datetime.utcnow() - datetime.timedelta(hours=settings.ANALYSIS_WINDOW_HOURS)
+        records_pd = records_pd[records_pd['timestamp_convert'] > analysis_window]
         records_pd.set_index('timestamp_convert', inplace=True)
         ohlc_pd = records_pd['price'].resample('5Min').ohlc()
         ohlc_pd['up'] = ohlc_pd['close'] > ohlc_pd['open']
 
-        if (ohlc_pd.shape[0] <= 60) or (np.sum(ohlc_pd['up']) < ohlc_pd.shape[0] * 0.7):
-            return buy_orders
+        # if ohlc_pd.shape[0] <= 20:
+        #     logger.info("there is not enough data to determine the short-term momentum")
+        #     return []
 
-        if records_pd['price'].values.max() - records_pd['price'].values.min() <= 500:
-            return buy_orders
+        if np.sum(ohlc_pd['up']) < ohlc_pd.shape[0] * settings.ENTRY_MARKET_UP_MOMENTUM_RATE_LOWER_BOUND:
+            logger.info("Up: %d, Total:%d" % (np.sum(ohlc_pd['up']), ohlc_pd.shape[0]))
+            return []
 
         # Step 3: Calculate the Buy Upper Bound
         max_buy_price = records_pd['price'].quantile(0.05)
+        mean_expected_price = records_pd['price'].quantile(0.5)
+
+        if mean_expected_price - max_buy_price <= settings.ENTRY_MARKET_MAX_MIN_GAP:
+            logger.info("max_buy_price: %d, mean_expected_price: %d." % (max_buy_price, mean_expected_price))
+            return []
 
         # Step 4: Generate Orders With Three Depths & Check Maximum Quota
+        simulated_position = current_position + 100
+        if simulated_position >= settings.ORDER_QUOTE_MAX_VALUE:
+            return buy_orders
         buy_orders.append({'price': max_buy_price, 'orderQty': 100, 'side': "Buy"})
-        buy_orders.append({'price': max_buy_price - 250, 'orderQty': 100, 'side': "Buy"})
+        logger.warning("BUY. Price: %d, orderQty: 100, mean value of last window: %f " % (max_buy_price, mean_expected_price))
+
+        simulated_position = simulated_position + 100
+        if simulated_position >= settings.ORDER_QUOTE_MAX_VALUE:
+            return buy_orders
         buy_orders.append({'price': max_buy_price - 500, 'orderQty': 100, 'side': "Buy"})
+
+        simulated_position = simulated_position + 100
+        if simulated_position >= settings.ORDER_QUOTE_MAX_VALUE:
+            return buy_orders
+        buy_orders.append({'price': max_buy_price - 1000, 'orderQty': 100, 'side': "Buy"})
+
         return buy_orders
 
     def generate_sell_orders(self):
@@ -374,9 +397,11 @@ class OrderManager:
 
         records = self.exchange.bitmex.recent_trades()
         records_pd = pd.DataFrame.from_dict(records)
+        records_pd['timestamp_convert'] = pd.to_datetime(records_pd['timestamp'])
+        analysis_window = datetime.utcnow() - datetime.timedelta(hours=settings.ANALYSIS_WINDOW_HOURS)
+        records_pd = records_pd[records_pd['timestamp_convert'] > analysis_window]
 
-        PROFIT_MARGIN = 0.05
-        target_price = position['avgCostPrice'] * (1 + PROFIT_MARGIN)
+        target_price = position['avgCostPrice'] * (1 + settings.PROFIT_MARGIN)
         target_mean_price = records_pd['price'].values.mean()
         sell_price = max(target_price, target_mean_price)
         sell_orders.append({'price': sell_price, 'orderQty': position['currentQty'], 'side': "Sell"})

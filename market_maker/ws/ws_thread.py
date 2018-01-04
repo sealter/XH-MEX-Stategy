@@ -30,6 +30,7 @@ class BitMEXWebsocket():
 
     # Don't grow a table larger than this amount. Helps cap memory usage.
     MAX_TABLE_LEN = 200
+    MAX_RECORD_LEN = 10000
 
     def __init__(self):
         self.logger = logging.getLogger('root')
@@ -254,8 +255,12 @@ class BitMEXWebsocket():
 
                     # Limit the max length of the table to avoid excessive memory usage.
                     # Don't trim orders because we'll lose valuable state if we do.
-                    if table not in ['order', 'orderBookL2'] and len(self.data[table]) > BitMEXWebsocket.MAX_TABLE_LEN:
-                        self.data[table] = self.data[table][(BitMEXWebsocket.MAX_TABLE_LEN // 2):]
+                    if table == 'trade':
+                        if len(self.data[table]) > BitMEXWebsocket.MAX_RECORD_LEN:
+                            self.data[table] = self.data[table][(BitMEXWebsocket.MAX_RECORD_LEN // 2):]
+                    elif table not in ['order', 'orderBookL2']:
+                        if len(self.data[table]) > BitMEXWebsocket.MAX_TABLE_LEN:
+                            self.data[table] = self.data[table][(BitMEXWebsocket.MAX_TABLE_LEN // 2):]
 
                 elif action == 'update':
                     self.logger.debug('%s: updating %s' % (table, message['data']))
